@@ -125,7 +125,7 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
      * (size SERIAL_SIZE) with uc_mmio_map, using serial_read / serial_write and
      * `v` as the user_data for both. */
 
-    uc_mmio_map(v->uc, SERIAL_BASE, SERIAL_SIZE, serial_read, serial_write, v);
+    uc_mmio_map(v->uc, SERIAL_BASE, SERIAL_SIZE, serial_read, v, serial_write, v);
 
     /* provided: allocate and initialize the device instance (its logic lives
      * in device.c) */
@@ -140,7 +140,7 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
      * (size DEV_SIZE) with uc_mmio_map, using vlog_device_mmio_read /
      * vlog_device_mmio_write and v->dev as the user_data for both. */
 
-    uc_mmio_map(v->uc, DEV_BASE, DEV_SIZE, vlog_device_mmio_read, vlog_device_mmio_write, v->dev)
+    uc_mmio_map(v->uc, DEV_BASE, DEV_SIZE, vlog_device_mmio_read, v->dev, vlog_device_mmio_write, v->dev);
 
     /* TODO(student): set the initial stack pointer. RSP goes just below the
      * reserved boot-info region (BOOTINFO_BASE), 16-byte aligned, via
@@ -157,7 +157,8 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
      * uc_hook_add(..., UC_HOOK_MEM_UNMAPPED, mem_invalid, v, 1, 0) so a guest
      * that touches unmapped memory faults cleanly instead of taking the
      * emulator down with it. */
-    uc_hook_add(v->uc, &h, UC_HOOK_MEM_UNMAPPED, mem_invalid, v, 1, 0)
+    uc_hook bad_mem;
+    uc_hook_add(v->uc, &bad_mem, UC_HOOK_MEM_UNMAPPED, mem_invalid, v, 1, 0);
 
     /* provided: optional instruction tracing (--trace) */
     if (trace) {
