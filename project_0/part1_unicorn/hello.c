@@ -28,6 +28,7 @@ int main(void)
     /* TODO(student): read the EAX register into `eax`.
      *   uc_reg_read(uc, UC_X86_REG_EAX, &eax);
      */
+    uc_reg_read(uc, UC_X86_REG_EAX, &eax);
 
     uc_close(uc);
     printf("%d\n", eax);

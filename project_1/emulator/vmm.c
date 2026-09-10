@@ -101,6 +101,13 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
      * UC_PROT_ALL) so the device can translate guest addresses to host
      * pointers. Return -1 on failure. */
 
+    v->ram = calloc (RAM_SIZE, sizeof(char));
+    if (!v->ram) {
+        fprintf(stderr, "out of memory allocating device\n");
+        return -1;
+    }
+    uc_mem_map_ptr(v->uc, RAM_BASE, RAM_SIZE, UC_PROT_ALL, v->ram);
+
     /* TODO(student): register the serial/control MMIO region at SERIAL_BASE
      * (size SERIAL_SIZE) with uc_mmio_map, using serial_read / serial_write and
      * `v` as the user_data for both. */
