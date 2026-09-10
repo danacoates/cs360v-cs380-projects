@@ -46,6 +46,14 @@ static inline void serial_write(uc_engine *uc, uint64_t offset,
      *   - offset SERIAL_POWEROFF: record the exit code (`value`), mark the VM
      *                             powered off, and stop the CPU (uc_emu_stop).
      *   - anything else:          ignore. */
+    if (offset == SERIAL_TX) {
+        char low_byte = (char)(value & 0xFF);
+        putchar(low_byte);
+    } else if (offset == SERIAL_POWEROFF) {
+        v->exit_code = (int) value;
+        v->powered_off = true;
+        uc_emu_stop(uc);
+    }
 }
 
 /* ---- Guest memory faults ---------------------------------------------- */
