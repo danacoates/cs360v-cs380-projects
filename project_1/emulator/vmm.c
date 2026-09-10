@@ -132,6 +132,8 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
     /* TODO(student): set the initial stack pointer. RSP goes just below the
      * reserved boot-info region (BOOTINFO_BASE), 16-byte aligned, via
      * uc_reg_write(UC_X86_REG_RSP, ...). The guest needs a stack to run. */
+    uint64_t rsp = BOOTINFO_BASE - 16;
+    uc_reg_write(v->uc, UC_X86_REG_RSP, &rsp);
 
     /* provided: boot-parameter pointer. The guest receives BOOTINFO_BASE in
      * RDI (its main()'s first argument). Leave this as-is. */
@@ -142,6 +144,7 @@ int vmm_create(struct vmm *v, int trace, const char *log_path)
      * uc_hook_add(..., UC_HOOK_MEM_UNMAPPED, mem_invalid, v, 1, 0) so a guest
      * that touches unmapped memory faults cleanly instead of taking the
      * emulator down with it. */
+    uc_hook_add(v->uc, &h, UC_HOOK_MEM_UNMAPPED, mem_invalid, v, 1, 0)
 
     /* provided: optional instruction tracing (--trace) */
     if (trace) {
