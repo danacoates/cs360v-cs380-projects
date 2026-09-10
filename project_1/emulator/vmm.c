@@ -170,7 +170,36 @@ int vmm_load_binary(struct vmm *v, const char *path)
      * starting at v->ram (offset 0 == RAM_BASE), rejecting a file larger than
      * RAM_SIZE, then set the initial RIP to RAM_BASE (the entry point) with
      * uc_reg_write(UC_X86_REG_RIP, ...). Return 0 on success, -1 on error. */
-    return -1;
+
+    // open flat binary at path
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        perror("fopen binary");
+        return -1;
+    }
+
+    // get file size 
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, RAM_BASE, SEEK_SET); // set to beginning of file 
+
+    if (sz < 0 || (uint64_t)sz > RAM_SIZE) {
+        fprintf(stderr, "binary too large or unreadable\n");
+        fclose(f);
+        return -1; 
+    }
+    
+    size_t n = fread(v->ram, 1, (size_t)sz, f);
+    fclose(f);
+    if (n != (size_t)sz) {
+        fprintf(stderr, "short read loading binary\n");
+        return -1;
+    }
+
+    uint64_t rip = RAM_BASE;
+    uc_reg_write(v->uc, UC_X86_REG_RIP, &rip);
+
+    return 0;
 }
 
 /* provided: boot-parameter blob loader (used by the test harness via
