@@ -236,14 +236,25 @@ int vmm_load_bootinfo(struct vmm *v, const char *path)
 
 int vmm_run(struct vmm *v)
 {
-    (void)v;
     /* TODO(student): start executing the guest from RIP (RAM_BASE) with
      * uc_emu_start. The guest never returns normally; it stops when the
      * POWEROFF register is written (your serial_write calls uc_emu_stop).
      *   - if the guest FAULTED (v->faulted), return VMM_EXIT_FAULT;
      *   - a Unicorn error while NOT powered off is a failure (return non-zero);
      *   - otherwise return v->exit_code. */
-    return 1;
+
+    uc_emu_start(v->uc, RAM_BASE, 0, 0, 0);
+    
+    if (v->faulted) {
+        return VMM_EXIT_FAULT;
+    } 
+    
+    if (!v->powered_off) { // unicorn error means v->powered_off is never set to true
+        return 1;
+    } 
+    
+    return v->exit_code;
+    
 }
 
 void vmm_destroy(struct vmm *v)
