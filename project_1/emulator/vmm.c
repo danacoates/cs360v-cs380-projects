@@ -69,7 +69,12 @@ static inline void serial_write(uc_engine *uc, uint64_t offset,
 static inline bool mem_invalid(uc_engine *uc, uc_mem_type type, uint64_t address,
                                int size, int64_t value, void *user_data)
 {
-    (void)uc; (void)type; (void)address; (void)size; (void)value; (void)user_data;
+    (void)type; (void)size; (void)value;
+    struct vmm *v = user_data;
+    v->faulted = 1;
+    v->fault_addr = address;
+    fprintf(stderr, "Invalid memory access at 0x%08llx\n", (unsigned long long)address);
+    uc_emu_stop(uc);
     return false;
 }
 
