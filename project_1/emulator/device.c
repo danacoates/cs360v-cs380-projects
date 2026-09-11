@@ -82,31 +82,22 @@ uint64_t vlog_device_mmio_read(uc_engine *uc, uint64_t offset,
     switch (offset) {
         case VLOG_REG_ID: 
             return VLOG_MAGIC;
-            break;
         case VLOG_REG_VERSION:
             return VLOG_VERSION;
-            break;
         case VLOG_REG_STATUS:
             return dev->status;
-            break;
         case VLOG_REG_MSG_LO:
             return dev->msg_addr_lo;
-            break;
         case VLOG_REG_MSG_HI:
             return dev->msg_addr_hi;
-            break;
         case VLOG_REG_LEN:
             return dev->len;
-            break;
         case VLOG_REG_LEVEL:
             return dev->level;
-            break;
         case VLOG_REG_SEQ:
             return dev->seq;
-            break;
         default:
             return 0;
-            break;
     }
 }
 
@@ -116,6 +107,72 @@ void vlog_device_mmio_write(uc_engine *uc, uint64_t offset,
     (void)uc; (void)size;
     struct vlog_device *dev = user_data;
     (void)dev; (void)offset; (void)value;
+
+
+    switch (offset) {
+        case VLOG_REG_MSG_LO:
+            dev->msg_addr_lo = value;
+            break;
+        case VLOG_REG_MSG_HI:
+            dev->msg_addr_hi = value;
+            break;
+        case VLOG_REG_LEN:
+            dev->len = value;
+            break;
+        case VLOG_REG_LEVEL:
+            dev->level = value;
+            break;
+        case VLOG_REG_SEQ:
+            dev->seq = value;
+            break;
+        case VLOG_REG_CMD:
+            switch((uint32_t)value) {
+                case VLOG_CMD_NOP:
+                    clear_error(dev);
+                    break;
+                case VLOG_CMD_LOG:
+                    if (dev->len > VLOG_MAX_MSG) {
+                        set_error(dev, VLOG_ERR_BADLEN);
+                        break;
+                    } 
+                    if (dev->len > 0) {
+                        struct vmm *v = dev->vmm;
+                        void *host_ptr = vmm_gpa_to_host(v, msg_addr(dev), dev->len);       
+                        if (!host_ptr) {
+                            set_error(dev, VLOG_ERR_BADADDR);
+                            break;
+                        }
+                        logstore_append(dev->vmm->store, dev->seq, dev->level,
+                                        host_ptr, dev->len);
+                        dev->seq++;
+                    }
+                    break;
+                case VLOG_CMD_FLUSH:
+                    logstore_flush(dev->vmm->store);
+                    break;
+                case VLOG_CMD_STAT:
+                    if (dev->len < sizeof(struct vlog_stats)) {
+                        set_error(dev, VLOG_ERR_BADLEN);
+                        break;
+                    }
+                    struct vlog_stats *stats = vmm_gpa_to_host(dev->vmm, msg_addr(dev), dev->len);
+                    if (!stats) {
+                        set_error(dev, VLOG_ERR_BADADDR);
+                        break;
+                    }
+                    stats->records = dev->seq; // I'm
+                    stats->bytes = dev->bytes; // so
+                    clear_error(dev);          // confused???
+                    break;
+                default:
+                    set_error(dev, VLOG_ERR_BADCMD);
+                    break;
+            }
+            break;
+        default:
+            return 0;
+            break;
+    }
 
     /* TODO(student): handle writes by `offset`:
      *   - operand registers (MSG_LO / MSG_HI / LEN / LEVEL): store the value;
