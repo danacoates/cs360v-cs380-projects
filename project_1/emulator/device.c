@@ -42,6 +42,7 @@ static inline uint64_t msg_addr(const struct vlog_device *dev)
 /* Set the ERROR flag with an error code (SPEC.md §3). */
 static inline void set_error(struct vlog_device *dev, uint32_t code)
 {
+    dev->status &= ~(VLOG_STATUS_ERROR | (0xffu << VLOG_STATUS_ERR_SHIFT));
     dev->status |= VLOG_STATUS_ERROR | (code << VLOG_STATUS_ERR_SHIFT);
 }
 
@@ -141,25 +142,33 @@ void vlog_device_mmio_write(uc_engine *uc, uint64_t offset,
                         }
                         logstore_append(dev->vmm->store, dev->seq, dev->level,
                                         host_ptr, dev->len);
-                        dev->seq++;
+                    } else {
+                        logstore_append(dev->vmm->store, dev->seq, dev->level,
+                                         NULL, 0);
                     }
+                    dev->seq++;
+                    dev->bytes += dev->len;
+                    clear_error(dev);
                     break;
                 case VLOG_CMD_FLUSH:
                     logstore_flush(dev->vmm->store);
+                    clear_error(dev);
                     break;
                 case VLOG_CMD_STAT:
                     if (dev->len < sizeof(struct vlog_stats)) {
                         set_error(dev, VLOG_ERR_BADLEN);
                         break;
                     }
-                    struct vlog_stats *stats = vmm_gpa_to_host(dev->vmm, msg_addr(dev), dev->len);
+                    struct vlog_stats *stats = vmm_gpa_to_host(
+                        dev->vmm, msg_addr(dev), sizeof(struct vlog_stats));
                     if (!stats) {
                         set_error(dev, VLOG_ERR_BADADDR);
                         break;
                     }
-                    stats->records = dev->seq; // I'm
-                    stats->bytes = dev->bytes; // so
-                    clear_error(dev);          // confused???
+                    stats->records = dev->seq; 
+                    stats->bytes = dev->bytes; 
+                
+                    clear_error(dev);
                     break;
                 default:
                     set_error(dev, VLOG_ERR_BADCMD);
@@ -167,7 +176,6 @@ void vlog_device_mmio_write(uc_engine *uc, uint64_t offset,
             }
             break;
         default:
-            return 0;
             break;
     }
 
