@@ -50,7 +50,7 @@ static inline void serial_write(uc_engine *uc, uint64_t offset,
         char low_byte = (char)(value & 0xFF);
         putchar(low_byte);
     } else if (offset == SERIAL_POWEROFF) {
-        v->exit_code = (int) value;
+        v->exit_code = value;
         v->powered_off = true;
         uc_emu_stop(uc);
     }
@@ -187,7 +187,7 @@ int vmm_load_binary(struct vmm *v, const char *path)
     // get file size 
     fseek(f, 0, SEEK_END);
     long sz = ftell(f);
-    fseek(f, RAM_BASE, SEEK_SET); // set to beginning of file 
+    fseek(f, 0, SEEK_SET); // reset to the beginning of the file
 
     if (sz < 0 || (uint64_t)sz > RAM_SIZE) {
         fprintf(stderr, "binary too large or unreadable\n");

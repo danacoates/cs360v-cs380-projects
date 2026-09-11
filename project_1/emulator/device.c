@@ -122,9 +122,6 @@ void vlog_device_mmio_write(uc_engine *uc, uint64_t offset,
         case VLOG_REG_LEVEL:
             dev->level = value;
             break;
-        case VLOG_REG_SEQ:
-            dev->seq = value;
-            break;
         case VLOG_REG_CMD:
             switch((uint32_t)value) {
                 case VLOG_CMD_NOP:
