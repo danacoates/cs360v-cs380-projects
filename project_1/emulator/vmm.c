@@ -278,9 +278,9 @@ void *vmm_gpa_to_host(struct vmm *v, uint64_t gpa, uint64_t len)
      * guest RAM [RAM_BASE, RAM_BASE + RAM_SIZE). Beware integer overflow when
      * checking the upper bound. See SPEC.md Part I, vmm_gpa_to_host. */
 
-    if (gpa > RAM_BASE) {
-        // check for int overflow and within bounds
-        if (((UINT64_MAX - gpa) > len) && ((gpa + len) < (RAM_BASE + RAM_SIZE))) {
+    if (gpa >= RAM_BASE) {
+        // check for int overflow and within bounds (inclusive)
+        if (((UINT64_MAX - gpa) > len) && ((gpa + len) <= (RAM_BASE + RAM_SIZE))) {
             return v->ram + (gpa - RAM_BASE);
         }
     }
