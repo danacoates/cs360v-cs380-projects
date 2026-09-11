@@ -77,7 +77,37 @@ uint64_t vlog_device_mmio_read(uc_engine *uc, uint64_t offset,
     /* TODO(student): return the 32-bit value of the register at `offset`
      * (relative to DEV_BASE): ID, VERSION, STATUS, MSG_LO, MSG_HI, LEN, LEVEL,
      * SEQ. Return 0 for any other offset. See SPEC.md §2. */
-    return 0;
+
+     // Switch statement containing all register offsets
+    switch (offset) {
+        case VLOG_REG_ID: 
+            return VLOG_MAGIC;
+            break;
+        case VLOG_REG_VERSION:
+            return VLOG_VERSION;
+            break;
+        case VLOG_REG_STATUS:
+            return dev->status;
+            break;
+        case VLOG_REG_MSG_LO:
+            return dev->msg_addr_lo;
+            break;
+        case VLOG_REG_MSG_HI:
+            return dev->msg_addr_hi;
+            break;
+        case VLOG_REG_LEN:
+            return dev->len;
+            break;
+        case VLOG_REG_LEVEL:
+            return dev->level;
+            break;
+        case VLOG_REG_SEQ:
+            return dev->seq;
+            break;
+        default:
+            return 0;
+            break;
+    }
 }
 
 void vlog_device_mmio_write(uc_engine *uc, uint64_t offset,
