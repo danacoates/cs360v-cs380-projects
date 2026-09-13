@@ -84,6 +84,18 @@ void *virtq_gpa_to_hva(const struct virtq_mem *mem, uint64_t gpa, uint64_t len)
     /* TODO(student): find the region that fully contains [gpa, gpa+len) and
      * return the host pointer for it; otherwise return NULL. See the notes
      * above, and remember what vmm_gpa_to_host() had to guard against. */
+    if (len == 0) {
+        return NULL;
+    }
+    for (int i = 0; i < mem->nregions; i++) {
+        if (gpa >= mem->regions[i].gpa) {
+            // check for int overflow and within bounds (inclusive)
+            if (((UINT64_MAX - gpa) > len) && ((gpa + len) <= (mem->regions[i].gpa + mem->regions[i].size))) {
+                return mem->regions[i].hva + (gpa - mem->regions[i].gpa);
+            }
+        }
+    }
+
     return NULL;
 }
 
