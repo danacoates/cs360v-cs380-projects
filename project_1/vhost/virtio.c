@@ -108,5 +108,38 @@ int vlog_virtq_handle(struct virtq *vq, const struct virtq_mem *mem,
 
     /* TODO(student): process every available chain (see the recipe above) and
      * return how many you completed. */
+
+    char rec[VIRTQ_MAX_RECORD] = malloc(sizeof(char) * VIRTQ_MAX_RECORD); 
+    __virtio16 rec_idx = 0;
+
+    __virtio16 idx = vq->avail->idx;
+    virtq_rmb();
+
+    while (vq->last_avail != idx) {
+        __virtio16 head = vq->avail->ring[vq->last_avail % vq->num];
+
+        // loop through descriptor table 
+        
+        while (head != vq->num) {
+            __virtio64 d = vq->desc[head];
+
+            // skip writable descriptors
+            if (d != VRING_DESC_F_WRITE) {
+                // need to check for indirect
+
+                void *hva_addr = virtq_gpa_to_hva(mem, d->addr, d->len);
+
+                if (hva_addr) {
+                    memcpy(rec[rec_idx], hva_addr, d->len);
+                }
+            }
+        }
+
+        vq->last_avail++;
+    }
+
+    
+
+
     return 0;
 }
