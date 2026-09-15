@@ -127,21 +127,22 @@ int vlog_virtq_handle(struct virtq *vq, const struct virtq_mem *mem,
 
             // skip writable descriptors
             if ((d.flags & VRING_DESC_F_WRITE) == 0) {
-                // need to check for indirect
+                // indirect descriptor table
                 if (d.flags & VRING_DESC_F_INDIRECT) {
                     struct vring_desc *indirect_table = virtq_gpa_to_hva(mem, d.addr, d.len);
                     
                     if (indirect_table) {
                         __virtio16 indirect_head = 0;
 
-                        while (indirect_head < (d.len / sizeof(struct vring_desc)) && indirect_hops < (d.len / sizeof(struct vring_desc))) {
+                        uint16_t num_entries = d.len / sizeof(struct vring_desc);
+                        while (indirect_head <  num_entries && indirect_hops < num_entries) {
                             struct vring_desc indirect_d = indirect_table[indirect_head];
 
                             if ((indirect_d.flags & VRING_DESC_F_WRITE) == 0) {
                                 void *hva_addr = virtq_gpa_to_hva(mem, indirect_d.addr, indirect_d.len);
 
                                 if (hva_addr && (rec_idx + indirect_d.len <= VIRTQ_MAX_RECORD)) {
-                                    memcpy(rec + rec_idx, hva_addr, indirect_d.len); // do we need to error if > max?
+                                    memcpy(rec + rec_idx, hva_addr, indirect_d.len); 
                                     rec_idx += indirect_d.len;
                                 }
                             }
@@ -160,7 +161,7 @@ int vlog_virtq_handle(struct virtq *vq, const struct virtq_mem *mem,
                     void *hva_addr = virtq_gpa_to_hva(mem, d.addr, d.len);
 
                     if (hva_addr && (rec_idx + d.len <= VIRTQ_MAX_RECORD)) {
-                        memcpy(rec + rec_idx, hva_addr, d.len); // do we need to error if > max?
+                        memcpy(rec + rec_idx, hva_addr, d.len); 
                         rec_idx += d.len;
                     }
                 }
@@ -188,3 +189,4 @@ int vlog_virtq_handle(struct virtq *vq, const struct virtq_mem *mem,
 
     return count;
 }
+
