@@ -109,37 +109,82 @@ int vlog_virtq_handle(struct virtq *vq, const struct virtq_mem *mem,
     /* TODO(student): process every available chain (see the recipe above) and
      * return how many you completed. */
 
-    char rec[VIRTQ_MAX_RECORD] = malloc(sizeof(char) * VIRTQ_MAX_RECORD); 
-    __virtio16 rec_idx = 0;
-
     __virtio16 idx = vq->avail->idx;
     virtq_rmb();
+    uint32_t count = 0;
+    
+    while (vq->last_avail < idx) {
+        uint32_t hop_count = 0;
+        char rec[VIRTQ_MAX_RECORD]; 
+        __virtio16 rec_idx = 0;
 
-    while (vq->last_avail != idx) {
-        __virtio16 head = vq->avail->ring[vq->last_avail % vq->num];
-
+        __virtio16 head = vq->avail->ring[vq->last_avail % vq->num]; // looping through the chain
+        __virtio16 temp = head;
         // loop through descriptor table 
-        
-        while (head != vq->num) {
-            __virtio64 d = vq->desc[head];
+        while (temp < vq->num && hop_count < vq->num) {
+            uint32_t indirect_hops = 0;
+            struct vring_desc d = vq->desc[temp];
 
             // skip writable descriptors
-            if (d != VRING_DESC_F_WRITE) {
+            if ((d.flags & VRING_DESC_F_WRITE) == 0) {
                 // need to check for indirect
+                if (d.flags & VRING_DESC_F_INDIRECT) {
+                    struct vring_desc *indirect_table = virtq_gpa_to_hva(mem, d.addr, d.len);
+                    
+                    if (indirect_table) {
+                        __virtio16 indirect_head = 0;
 
-                void *hva_addr = virtq_gpa_to_hva(mem, d->addr, d->len);
+                        while (indirect_head < (d.len / sizeof(struct vring_desc)) && indirect_hops < (d.len / sizeof(struct vring_desc))) {
+                            struct vring_desc indirect_d = indirect_table[indirect_head];
 
-                if (hva_addr) {
-                    memcpy(rec[rec_idx], hva_addr, d->len);
+                            if ((indirect_d.flags & VRING_DESC_F_WRITE) == 0) {
+                                void *hva_addr = virtq_gpa_to_hva(mem, indirect_d.addr, indirect_d.len);
+
+                                if (hva_addr && (rec_idx + indirect_d.len <= VIRTQ_MAX_RECORD)) {
+                                    memcpy(rec + rec_idx, hva_addr, indirect_d.len); // do we need to error if > max?
+                                    rec_idx += indirect_d.len;
+                                }
+                            }
+
+                            if (indirect_d.flags & VRING_DESC_F_NEXT) {
+                                indirect_head = indirect_d.next;
+                            } else {
+                                break;
+                            }
+                            indirect_hops++;
+                        }
+                    }
+
+                } else {
+                    // data: append bytes
+                    void *hva_addr = virtq_gpa_to_hva(mem, d.addr, d.len);
+
+                    if (hva_addr && (rec_idx + d.len <= VIRTQ_MAX_RECORD)) {
+                        memcpy(rec + rec_idx, hva_addr, d.len); // do we need to error if > max?
+                        rec_idx += d.len;
+                    }
                 }
             }
+
+            if (d.flags & VRING_DESC_F_NEXT) {
+                temp = d.next;
+            } else {
+                break;
+            }
+            hop_count++;
         }
 
+        vlog_sink_emit(sink, rec, rec_idx);
+
+        vq->used->ring[vq->used->idx % vq->num].id = head;
+        vq->used->ring[vq->used->idx % vq->num].len = 0;
+        virtq_wmb();
+        vq->used->idx++;
+
         vq->last_avail++;
+        count++;
     }
 
-    
 
-
-    return 0;
+    return count;
 }
