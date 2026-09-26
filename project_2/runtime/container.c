@@ -24,6 +24,10 @@
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <net/route.h>
 
 /* ---- Part I: namespaces ----------------------------------------------- */
 
@@ -32,7 +36,7 @@ int container_namespaces(void)
     /* TODO(student): return the bitwise-OR of CLONE_NEWUSER, CLONE_NEWPID,
      * CLONE_NEWNS, CLONE_NEWUTS and CLONE_NEWNET. Returning 0 gives no
      * isolation at all. */
-    return 0;
+    return CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET;
 }
 
 int container_write_idmaps(struct container *c, pid_t child)
@@ -44,6 +48,31 @@ int container_write_idmaps(struct container *c, pid_t child)
      *   /proc/<child>/setgroups   <- "deny"      (required before gid_map)
      *   /proc/<child>/gid_map     <- "0 <your-gid> 1"
      * This maps container id 0 (root) to your real id outside. See getuid(2). */
+
+    uid_t uid = getuid(); 
+    gid_t gid = getgid();
+
+    char value[64];
+    char path[64];
+
+    snprintf(value, sizeof(value), "0 %u 1", uid);
+    snprintf(path, sizeof(path), "/proc/%u/uid_map", child);
+    if (write_file(path, value) == -1) {
+        return -1;
+    } 
+
+    snprintf(value, sizeof(value), "deny");
+    snprintf(path, sizeof(path), "/proc/%u/setgroups", child);
+    if (write_file(path, value) == -1) {
+        return -1;
+    } 
+
+    snprintf(value, sizeof(value), "0 %u 1", gid);
+    snprintf(path, sizeof(path), "/proc/%u/gid_map", child);
+    if (write_file(path, value) == -1) {
+        return -1;
+    } 
+
     return 0;
 }
 
@@ -112,6 +141,9 @@ int container_setup(struct container *c)
      *     syscall filter (do it last of all).
      *
      * Return 0 on success, -1 to abort. */
+
+    if (sethostname(c->hostname, strlen(c->hostname)) == -1) return -1;
+    if (container_network() == -1) return -1;
     return 0;
 }
 
@@ -123,6 +155,25 @@ int container_network(void)
      * "lo", ioctl(SIOCGIFFLAGS) to read its flags, OR in IFF_UP | IFF_RUNNING,
      * and ioctl(SIOCSIFFLAGS) to set them. Best-effort: this needs CAP_NET_ADMIN,
      * so call it before dropping capabilities. */
+
+    int fd = socket (AF_INET, SOCK_DGRAM, 0);
+    if (fd == -1) return -1;
+
+    struct ifreq ifr;
+    ifr.ifr_name = "lo"; // should we memset and stuff?
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == -1) {
+        close(fd);
+        return -1; 
+    }
+
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == -1) {
+        close(fd);
+        return -1; 
+    }
+
+    close(fd);
     return 0;
 }
 
@@ -139,6 +190,34 @@ int container_net_config(struct container *c)
      *     (rt_dst/rt_genmask 0.0.0.0, rt_gateway = c->net_gw,
      *     rt_flags = RTF_UP | RTF_GATEWAY) and ioctl(SIOCADDRT).
      * Needs CAP_NET_ADMIN, so container_setup() calls this before the cap drop. */
+    int fd = socket (AF_INET, SOCK_DGRAM, 0);
+    if (fd == -1) return -1; 
+
+    struct ifreq ifr;
+    ifr.ifr_name = c->net_ifname; // should we memset and stuff?
+
+    if (ioctl(fd, SIOCSIFADDR, &(c->net_ip)) == -1) {
+        close(fd);
+        return -1;
+    }
+
+    if (ioctl(fd, SIOCSIFNETMASK, &(c->net_prefix)) == -1) { // double check addresses? do we need mask
+        close(fd);
+        return -1;
+    }
+
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == -1) {
+        close(fd);
+        return -1; 
+    }
+
+    struct rtentry rte;
+    rte.rt_gateway = c->net_gw;
+
+
+    
     return 0;
 }
 
