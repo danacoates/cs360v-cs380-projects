@@ -31,6 +31,25 @@
 #include <sys/socket.h>
 #include <net/if.h>
 #include <net/route.h>
+#include <sys/mount.h>
+#include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <linux/capability.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <linux/audit.h>
+
+#if defined(__x86_64__)
+#define CONTAINER_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define CONTAINER_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#else
+#error "Unsupported architecture"
+#endif
+
+#define DENY_SYSCALL(name)                                      \
+    BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_##name, 0, 1),      \
+    BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM)
 
 /* ---- Part I: namespaces ----------------------------------------------- */
 
@@ -198,7 +217,53 @@ int container_setup(struct container *c)
     if (chdir("/") == -1) return -1;
 
     // Part III
+    for (int cap = 0; cap <= CAP_LAST_CAP; cap++) {
+        if (prctl(PR_CAPBSET_DROP, cap, 0, 0, 0) == -1) return -1;
+    }
 
+    struct __user_cap_header_struct hdr = {
+        .version = _LINUX_CAPABILITY_VERSION_3,
+        .pid = 0
+    };
+    struct __user_cap_data_struct data[2] = {0};
+
+    if (syscall(SYS_capset, &hdr, data) == -1) return -1;
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1) return -1;
+
+    struct sock_filter filter[] = {
+        // Checking architecture and rejecting mismatched option
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                 CONTAINER_AUDIT_ARCH, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+
+        // Checking syscalls
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        DENY_SYSCALL(ptrace),
+        DENY_SYSCALL(mount),
+        DENY_SYSCALL(umount2),
+        DENY_SYSCALL(pivot_root),
+        DENY_SYSCALL(chroot),
+        DENY_SYSCALL(setns),
+        DENY_SYSCALL(unshare),
+        DENY_SYSCALL(reboot),
+        DENY_SYSCALL(swapon),
+        DENY_SYSCALL(swapoff),
+        DENY_SYSCALL(kexec_load),
+        DENY_SYSCALL(init_module),
+        DENY_SYSCALL(finit_module),
+        DENY_SYSCALL(delete_module),
+
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+
+    struct sock_fprog prog = {
+        .filter = filter,
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0]))
+    };
+
+    if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog) == -1) return -1;
+ 
     return 0;
 }
 
