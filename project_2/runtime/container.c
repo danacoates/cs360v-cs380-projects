@@ -18,9 +18,12 @@
 #define _GNU_SOURCE
 #include "container.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <errno.h>
@@ -144,6 +147,58 @@ int container_setup(struct container *c)
 
     if (sethostname(c->hostname, strlen(c->hostname)) == -1) return -1;
     if (container_network() == -1) return -1;
+    if (c->net_enabled && container_net_config(c) == -1) return -1;
+
+    // Part II
+    mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+
+    // bind c->rootfs onto itself
+    if (mount(c->rootfs, c->rootfs, NULL, MS_BIND | MS_REC, NULL) == -1) return -1;
+
+    // then remount that bind read-only
+    if (mount(NULL, c->rootfs, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL) == -1) return -1;
+
+
+    // mounting writable temp fs onto root/tmpfs
+    char tmp_path[64];
+    snprintf(tmp_path, sizeof(tmp_path), "%s/tmp", c->rootfs);
+
+    char dev_path[64];
+    snprintf(dev_path, sizeof(dev_path), "%s/dev", c->rootfs);
+
+    char dev_null_path[64];
+    snprintf(dev_null_path, sizeof(dev_null_path), "%s/dev/null", c->rootfs);
+
+    char dev_zero_path[64];
+    snprintf(dev_zero_path, sizeof(dev_zero_path), "%s/dev/zero", c->rootfs);
+
+    char proc_path[64];
+
+    snprintf(proc_path, sizeof(proc_path), "%s/proc", c->rootfs);
+
+    if (mount("tmpfs", tmp_path, "tmpfs", 0, NULL) == -1) return -1; 
+    if (mount("tmpfs", dev_path, "tmpfs", 0, NULL) == -1) return -1; 
+
+    // create dev/null and dev/zero files (?)
+    int fd;
+    if ((fd = open(dev_null_path, O_CREAT | O_WRONLY, 0666)) == -1) return -1;
+    close(fd);
+    if ((fd = open(dev_zero_path, O_CREAT | O_WRONLY, 0666)) == -1) return -1;
+    close(fd);
+
+    // mounting (spec part II)
+    if (mount("/dev/null", dev_null_path, NULL, MS_BIND, NULL) == -1) return -1;
+    if (mount("dev/zero", dev_zero_path, NULL, MS_BIND, NULL) == -1) return -1;
+    if (mount("proc", proc_path, "proc", 0, NULL) == -1) return -1;
+
+    //detach root
+    if (chdir(c->rootfs) == -1) return -1;
+    if (syscall(SYS_pivot_root, ".", ".") == -1) return -1;
+    if (umount2(".", MNT_DETACH) == -1) return -1;
+    if (chdir("/") == -1) return -1;
+
+    // Part III
+
     return 0;
 }
 
@@ -156,21 +211,22 @@ int container_network(void)
      * and ioctl(SIOCSIFFLAGS) to set them. Best-effort: this needs CAP_NET_ADMIN,
      * so call it before dropping capabilities. */
 
-    int fd = socket (AF_INET, SOCK_DGRAM, 0);
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd == -1) return -1;
 
     struct ifreq ifr;
-    ifr.ifr_name = "lo"; // should we memset and stuff?
+    memset(&ifr, 0, sizeof(ifr));
+    memcpy(ifr.ifr_name, "lo", sizeof("lo"));
     if (ioctl(fd, SIOCGIFFLAGS, &ifr) == -1) {
         close(fd);
-        return -1; 
+        return -1;
     }
 
     ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
 
-    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == -1) {
+    if (ioctl(fd, SIOCSIFFLAGS, &ifr) == -1) {
         close(fd);
-        return -1; 
+        return -1;
     }
 
     close(fd);
@@ -179,7 +235,6 @@ int container_network(void)
 
 int container_net_config(struct container *c)
 {
-    (void)c;
     /* TODO(student) Part I (--net only): the provided container_net_host_setup()
      * has put an interface named c->net_ifname in this namespace. Configure it
      * (same ioctls as loopback, plus an address and a route):
@@ -190,35 +245,74 @@ int container_net_config(struct container *c)
      *     (rt_dst/rt_genmask 0.0.0.0, rt_gateway = c->net_gw,
      *     rt_flags = RTF_UP | RTF_GATEWAY) and ioctl(SIOCADDRT).
      * Needs CAP_NET_ADMIN, so container_setup() calls this before the cap drop. */
-    int fd = socket (AF_INET, SOCK_DGRAM, 0);
-    if (fd == -1) return -1; 
+    if (!c || !c->net_ifname || !c->net_ip || !c->net_gw ||
+        c->net_prefix < 0 || c->net_prefix > 32) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd == -1) return -1;
 
     struct ifreq ifr;
-    ifr.ifr_name = c->net_ifname; // should we memset and stuff?
-
-    if (ioctl(fd, SIOCSIFADDR, &(c->net_ip)) == -1) {
-        close(fd);
-        return -1;
+    memset(&ifr, 0, sizeof(ifr));
+    size_t ifname_len = strlen(c->net_ifname);
+    if (ifname_len == 0 || ifname_len >= sizeof(ifr.ifr_name)) {
+        errno = ENAMETOOLONG;
+        goto fail;
     }
+    memcpy(ifr.ifr_name, c->net_ifname, ifname_len + 1);
 
-    if (ioctl(fd, SIOCSIFNETMASK, &(c->net_prefix)) == -1) { // double check addresses? do we need mask
-        close(fd);
-        return -1;
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    if (inet_pton(AF_INET, c->net_ip, &address.sin_addr) != 1) {
+        errno = EINVAL;
+        goto fail;
     }
+    memcpy(&ifr.ifr_addr, &address, sizeof(address));
+    if (ioctl(fd, SIOCSIFADDR, &ifr) == -1) goto fail;
 
+    memset(&address.sin_addr, 0, sizeof(address.sin_addr));
+    uint32_t mask = c->net_prefix == 0
+        ? 0
+        : UINT32_MAX << (32 - c->net_prefix);
+    address.sin_addr.s_addr = htonl(mask);
+    memcpy(&ifr.ifr_netmask, &address, sizeof(address));
+    if (ioctl(fd, SIOCSIFNETMASK, &ifr) == -1) goto fail;
+
+    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == -1) goto fail;
     ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+    if (ioctl(fd, SIOCSIFFLAGS, &ifr) == -1) goto fail;
 
-    if (ioctl(fd, SIOCGIFFLAGS, &ifr) == -1) {
-        close(fd);
-        return -1; 
+    struct rtentry route;
+    memset(&route, 0, sizeof(route));
+    struct sockaddr_in route_address;
+    memset(&route_address, 0, sizeof(route_address));
+    route_address.sin_family = AF_INET;
+    route_address.sin_addr.s_addr = INADDR_ANY;
+    memcpy(&route.rt_dst, &route_address, sizeof(route_address));
+    memcpy(&route.rt_genmask, &route_address, sizeof(route_address));
+
+    if (inet_pton(AF_INET, c->net_gw, &route_address.sin_addr) != 1) {
+        errno = EINVAL;
+        goto fail;
     }
+    memcpy(&route.rt_gateway, &route_address, sizeof(route_address));
+    route.rt_flags = RTF_UP | RTF_GATEWAY;
+    route.rt_dev = (char *)c->net_ifname;
+    if (ioctl(fd, SIOCADDRT, &route) == -1) goto fail;
 
-    struct rtentry rte;
-    rte.rt_gateway = c->net_gw;
-
-
-    
+    close(fd);
     return 0;
+
+fail:
+    {
+        int saved_errno = errno;
+        close(fd);
+        errno = saved_errno;
+    }
+    return -1;
 }
 
 int container_seccomp(void)
