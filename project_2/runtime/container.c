@@ -113,6 +113,24 @@ int container_cgroup_init(struct container *c)
      *     <cg_path>/memory.max (a value < 0 means the literal string "max"), and
      *     write "0" to <cg_path>/memory.swap.max so hitting the memory cap
      *     OOM-kills instead of swapping. */
+    char *value = "+pids +memory";
+    char path[64];
+
+    snprintf(path, sizeof(path), "%s/cgroup.subtree_control", c->cgroup_base);
+    if (write_file(path, value) == -1) return -1;
+
+    snprintf(c->cg_path, sizeof(c->cg_path), "%s/%s", c->cgroup_base, c->name);
+    if (mkdir(path, 0755) == -1) return -1; //check mode bits 
+
+    snprintf(path, sizeof(path), "%s/pids.max", c->cg_path);
+    if (write_file(path, c->pids_max) == -1) return -1;
+
+    snprintf(path, sizeof(path), "%s/memory.max", c->cg_path);
+    if (write_file(path, c->mem_max) == -1) return -1;
+
+    snprintf(path, sizeof(path), "%s/memory.swap.max", c->cg_path);
+    if (write_file(path, 0) == -1) return -1;
+
     return 0;
 }
 
@@ -121,6 +139,9 @@ int container_cgroup_enter(struct container *c, pid_t child)
     (void)c; (void)child;
     /* TODO(student): move `child` into this container's cgroup by writing its
      * pid to <cg_path>/cgroup.procs. */
+    char path[64];
+    snprintf(path, sizeof(path), "%s/cgroup.procs", c->cg_path);
+    if (write_file(path, child) == -1) return -1;
     return 0;
 }
 
@@ -230,40 +251,7 @@ int container_setup(struct container *c)
     if (syscall(SYS_capset, &hdr, data) == -1) return -1;
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1) return -1;
 
-    struct sock_filter filter[] = {
-        // Checking architecture and rejecting mismatched option
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
-                 CONTAINER_AUDIT_ARCH, 1, 0),
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
-
-        // Checking syscalls
-        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
-        DENY_SYSCALL(ptrace),
-        DENY_SYSCALL(mount),
-        DENY_SYSCALL(umount2),
-        DENY_SYSCALL(pivot_root),
-        DENY_SYSCALL(chroot),
-        DENY_SYSCALL(setns),
-        DENY_SYSCALL(unshare),
-        DENY_SYSCALL(reboot),
-        DENY_SYSCALL(swapon),
-        DENY_SYSCALL(swapoff),
-        DENY_SYSCALL(kexec_load),
-        DENY_SYSCALL(init_module),
-        DENY_SYSCALL(finit_module),
-        DENY_SYSCALL(delete_module),
-
-        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
-    };
-
-    struct sock_fprog prog = {
-        .filter = filter,
-        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0]))
-    };
-
-    if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog) == -1) return -1;
- 
+    
     return 0;
 }
 
@@ -395,6 +383,41 @@ int container_seccomp(void)
      *   3. otherwise return SECCOMP_RET_ALLOW.
      * Then prctl(PR_SET_NO_NEW_PRIVS, 1, ...) and
      * syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog). */
+
+    struct sock_filter filter[] = {
+        // Checking architecture and rejecting mismatched option
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K,
+                 CONTAINER_AUDIT_ARCH, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+
+        // Checking syscalls
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        DENY_SYSCALL(ptrace),
+        DENY_SYSCALL(mount),
+        DENY_SYSCALL(umount2),
+        DENY_SYSCALL(pivot_root),
+        DENY_SYSCALL(chroot),
+        DENY_SYSCALL(setns),
+        DENY_SYSCALL(unshare),
+        DENY_SYSCALL(reboot),
+        DENY_SYSCALL(swapon),
+        DENY_SYSCALL(swapoff),
+        DENY_SYSCALL(kexec_load),
+        DENY_SYSCALL(init_module),
+        DENY_SYSCALL(finit_module),
+        DENY_SYSCALL(delete_module),
+
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+
+    struct sock_fprog prog = {
+        .filter = filter,
+        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0]))
+    };
+
+    if (syscall(SYS_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog) == -1) return -1;
+ 
     return 0;
 }
 
@@ -413,6 +436,34 @@ int container_init(struct container *c)
      *      included). Stop when the command itself is reaped; return its exit
      *      status (WEXITSTATUS, or 128+signal if it was killed).
      * The value you return here is what the container exits with. */
+
+    if (close(c->sync[1]) == -1) return -1;
+    if (read(c->sync[0], NULL, 1) == -1) return -1; // do we need to have buf
+    if (close(c->sync[0]) == -1) return -1;
+
+    container_setup(c);
+
+    pid_t fork_ret = fork();
+    if (fork_ret == 0) {
+        // child 
+        execvp(c->argv[0], c->argv);
+        exit(-1);
+    } else {
+        while (1) {
+            int status;
+            pid_t w = waitpid(-1, &status, 0);
+            
+            if (w == fork_ret) {
+                if(WIFEXITED(status)) {
+                    return WEXITSTATUS(status);
+                } else if (WIFSIGNALED(status)) {
+                    return 128 + WTERMSIG(status);
+                }
+            }
+        }
+    }
+
+
     return 0;
 }
 
@@ -459,5 +510,7 @@ int container_cleanup(struct container *c)
     /* TODO(student): the child (and its whole subtree) is already reaped, so its
      * cgroup is empty and its mount namespace is gone. Remove the cgroup
      * directory you created (rmdir c->cg_path). Tolerate it already being gone. */
+    if (rmdir(c->cg_path) == -1 && errno != ENOENT) return -1;
+    
     return 0;
 }
