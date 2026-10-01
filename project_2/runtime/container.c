@@ -42,6 +42,7 @@
 #include <fcntl.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
+#include <limits.h>
 
 #if defined(__x86_64__)
 #define CONTAINER_AUDIT_ARCH AUDIT_ARCH_X86_64
@@ -117,36 +118,61 @@ int container_cgroup_init(struct container *c)
      *     <cg_path>/memory.max (a value < 0 means the literal string "max"), and
      *     write "0" to <cg_path>/memory.swap.max so hitting the memory cap
      *     OOM-kills instead of swapping. */
-    char *value = "+pids +memory";
-    char path[64];
+    char value[64];
+    char path[PATH_MAX];
 
     snprintf(path, sizeof(path), "%s/cgroup.subtree_control", c->cgroup_base);
-    if (write_file(path, value) == -1) return -1;
+
+    if (write_file(path, "+pids +memory") == -1) return -1;
 
     snprintf(c->cg_path, sizeof(c->cg_path), "%s/%s", c->cgroup_base, c->name);
-    if (mkdir(path, 0755) == -1) return -1; //check mode bits 
+    if (mkdir(c->cg_path, 0755) == -1 && errno != EEXIST) return -1;
 
     snprintf(path, sizeof(path), "%s/pids.max", c->cg_path);
-    if (write_file(path, c->pids_max) == -1) return -1;
+    if (c->pids_max < 0)
+        snprintf(value, sizeof(value), "max");
+    else
+        snprintf(value, sizeof(value), "%lld",
+                (long long)c->pids_max);
 
+    if (write_file(path, value) == -1)
+        return -1;
+
+    /* memory.max */
     snprintf(path, sizeof(path), "%s/memory.max", c->cg_path);
-    if (write_file(path, c->mem_max) == -1) return -1;
+    if (c->mem_max < 0)
+        snprintf(value, sizeof(value), "max");
+    else
+        snprintf(value, sizeof(value), "%lld",
+                (long long)c->mem_max);
 
+    if (write_file(path, value) == -1)
+        return -1;
+
+    /* memory.swap.max */
     snprintf(path, sizeof(path), "%s/memory.swap.max", c->cg_path);
-    if (write_file(path, 0) == -1) return -1;
+    if (write_file(path, "0") == -1)
+        return -1;
 
     return 0;
 }
 
 int container_cgroup_enter(struct container *c, pid_t child)
 {
-    (void)c; (void)child;
     /* TODO(student): move `child` into this container's cgroup by writing its
      * pid to <cg_path>/cgroup.procs. */
-    char path[64];
-    snprintf(path, sizeof(path), "%s/cgroup.procs", c->cg_path);
-    if (write_file(path, child) == -1) return -1;
-    return 0;
+    (void)c; (void)child;
+    char path[PATH_MAX];
+    char value[64];
+
+    int n = snprintf(path, sizeof(path), "%s/cgroup.procs", c->cg_path);
+    if (n < 0 || (size_t)n >= sizeof(path)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+
+    snprintf(value, sizeof(value), "%ld", (long)child);
+    return write_file(path, value);
 }
 
 /* ---- Parts I/II/III: isolation, run inside the container init --------- */
@@ -194,14 +220,13 @@ int container_setup(struct container *c)
     if (c->net_enabled && container_net_config(c) == -1) return -1;
 
     // Part II
-    mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL);
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) == -1) return -1;
 
     // bind c->rootfs onto itself
     if (mount(c->rootfs, c->rootfs, NULL, MS_BIND | MS_REC, NULL) == -1) return -1;
 
     // then remount that bind read-only
     if (mount(NULL, c->rootfs, NULL, MS_BIND | MS_REMOUNT | MS_RDONLY, NULL) == -1) return -1;
-
 
     // mounting writable temp fs onto root/tmpfs
     char tmp_path[64];
@@ -232,7 +257,7 @@ int container_setup(struct container *c)
 
     // mounting (spec part II)
     if (mount("/dev/null", dev_null_path, NULL, MS_BIND, NULL) == -1) return -1;
-    if (mount("dev/zero", dev_zero_path, NULL, MS_BIND, NULL) == -1) return -1;
+    if (mount("/dev/zero", dev_zero_path, NULL, MS_BIND, NULL) == -1) return -1;
     if (mount("proc", proc_path, "proc", 0, NULL) == -1) return -1;
 
     //detach root
@@ -449,9 +474,8 @@ int container_init(struct container *c)
     while (n == -1 && errno == EINTR) {
         n = read(c->sync[0], &byte, 1);
     }
-    // if (read(c->sync[0], NULL, 1) == -1) return -1; // do we need to have buf
-    if (close(c->sync[0]) == -1) return -1;
 
+    if (close(c->sync[0]) == -1) return -1;
     if (container_setup(c) == -1) return -1;
 
     pid_t fork_ret = fork();
@@ -465,7 +489,6 @@ int container_init(struct container *c)
         while (1) {
             int status;
             pid_t w = waitpid(-1, &status, 0);
-            
             if (w == fork_ret) {
                 if(WIFEXITED(status)) {
                     return WEXITSTATUS(status);
@@ -515,14 +538,14 @@ int container_run(struct container *c)
 
     /* Keep the "container: " prefix on anything you print here: the test
      * harness reads the container's output and skips lines starting with it. */
-    //fprintf(stderr, "container: container_run() is not implemented yet, "
-    //                "so nothing ran. See SPEC.md.\n");
-    container_cgroup_init(c);
+
+    if (container_cgroup_init(c) == -1) return -1;
     if (pipe(c->sync) == -1) return -1;
     static char stack[CONTAINER_STACK_SIZE];
     pid_t child = clone(child_entry, stack + CONTAINER_STACK_SIZE, container_namespaces() | SIGCHLD, c);
-    container_write_idmaps(c, child);
-    container_cgroup_enter(c, child);
+    if (child == -1) return -1;
+    if (container_write_idmaps(c, child) == -1) return -1;
+    if (container_cgroup_enter(c, child) == -1) return -1;
     if (c->net_enabled) {
         container_net_host_setup(c, child);
     }
@@ -530,18 +553,20 @@ int container_run(struct container *c)
     char byte = 0;
     if (write(c->sync[1], &byte, 1) == -1) return -1;
     int status;
-    waitpid(child, &status, 0);
-    if (c->net_enabled) {
-        container_net_host_teardown(c);
-    }
-    if(WIFEXITED(status)) {
-        return WEXITSTATUS(status);
-    }
+    if (waitpid(child, &status, 0) == -1) return -1;
+    int result = 1;
 
-    return 1;
+    if (WIFEXITED(status))
+        result = WEXITSTATUS(status);
+    else if (WIFSIGNALED(status))
+        result = 128 + WTERMSIG(status);
+
+    if (c->net_enabled) container_net_host_teardown(c);
+
+    if (container_cleanup(c) == -1) return -1;
+
+    return result;
 }
-
-
 
 /* ---- Part VI: teardown ------------------------------------------------- */
 
