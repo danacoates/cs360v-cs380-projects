@@ -443,12 +443,20 @@ int container_init(struct container *c)
      * The value you return here is what the container exits with. */
 
     if (close(c->sync[1]) == -1) return -1;
-    if (read(c->sync[0], NULL, 1) == -1) return -1; // do we need to have buf
+
+    char byte;
+    ssize_t n = read(c->sync[0], &byte, 1);
+    while (n == -1 && errno == EINTR) {
+        n = read(c->sync[0], &byte, 1);
+    }
+    // if (read(c->sync[0], NULL, 1) == -1) return -1; // do we need to have buf
     if (close(c->sync[0]) == -1) return -1;
 
-    container_setup(c);
+    if (container_setup(c) == -1) return -1;
 
     pid_t fork_ret = fork();
+    if (fork_ret == -1) return -1;
+
     if (fork_ret == 0) {
         // child 
         execvp(c->argv[0], c->argv);
@@ -467,7 +475,6 @@ int container_init(struct container *c)
             }
         }
     }
-
 
     return 0;
 }
