@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <signal.h> 
 #include <unistd.h>
 #include <errno.h>
 #include <sys/ioctl.h>
@@ -38,6 +39,9 @@
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <linux/audit.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
 
 #if defined(__x86_64__)
 #define CONTAINER_AUDIT_ARCH AUDIT_ARCH_X86_64
@@ -250,6 +254,7 @@ int container_setup(struct container *c)
 
     if (syscall(SYS_capset, &hdr, data) == -1) return -1;
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == -1) return -1;
+    if (container_seccomp() == -1) return -1;
 
     
     return 0;
@@ -359,12 +364,12 @@ int container_net_config(struct container *c)
     close(fd);
     return 0;
 
-fail:
-    {
-        int saved_errno = errno;
-        close(fd);
-        errno = saved_errno;
-    }
+    fail:
+        {
+            int saved_errno = errno;
+            close(fd);
+            errno = saved_errno;
+        }
     return -1;
 }
 
@@ -468,6 +473,12 @@ int container_init(struct container *c)
 }
 
 /* ---- the whole lifecycle: main.c calls only this ----------------------- */
+// for clone
+static int child_entry(void *arg)
+{
+    struct container *c = (struct container *)arg;
+    return container_init(c);
+}
 
 int container_run(struct container *c)
 {
@@ -497,10 +508,33 @@ int container_run(struct container *c)
 
     /* Keep the "container: " prefix on anything you print here: the test
      * harness reads the container's output and skips lines starting with it. */
-    fprintf(stderr, "container: container_run() is not implemented yet, "
-                    "so nothing ran. See SPEC.md.\n");
+    //fprintf(stderr, "container: container_run() is not implemented yet, "
+    //                "so nothing ran. See SPEC.md.\n");
+    container_cgroup_init(c);
+    if (pipe(c->sync) == -1) return -1;
+    static char stack[CONTAINER_STACK_SIZE];
+    pid_t child = clone(child_entry, stack + CONTAINER_STACK_SIZE, container_namespaces() | SIGCHLD, c);
+    container_write_idmaps(c, child);
+    container_cgroup_enter(c, child);
+    if (c->net_enabled) {
+        container_net_host_setup(c, child);
+    }
+    if (close(c->sync[0]) == -1) return -1;
+    char byte = 0;
+    if (write(c->sync[1], &byte, 1) == -1) return -1;
+    int status;
+    waitpid(child, &status, 0);
+    if (c->net_enabled) {
+        container_net_host_teardown(c);
+    }
+    if(WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+
     return 1;
 }
+
+
 
 /* ---- Part VI: teardown ------------------------------------------------- */
 
