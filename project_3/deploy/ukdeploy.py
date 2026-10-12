@@ -190,7 +190,7 @@ def cmd_build(args):
     Your return value becomes the exit status of `./deploy/ukdeploy.py build`.
     To check it, run that command: on success, the image is under
     app/.unikraft/build/. SPEC.md Part I explains why the two flags are needed."""
-    print("TODO: implement build")
+    # print("TODO: implement build")
     
     if (shutil.which("kraft") is None):
         print("Error: kraft is not installed\n")
