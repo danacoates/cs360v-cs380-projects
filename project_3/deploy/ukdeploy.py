@@ -191,7 +191,22 @@ def cmd_build(args):
     To check it, run that command: on success, the image is under
     app/.unikraft/build/. SPEC.md Part I explains why the two flags are needed."""
     print("TODO: implement build")
-    return 1
+    
+    if (shutil.which("kraft") is None):
+        print("Error: kraft is not installed\n")
+        return 1
+    
+    argv = ["kraft", "build", "--plat", "qemu", "--arch", args.arch,
+                     "--no-update", "--no-prompt", "-j", str(os.cpu_count())]
+    result = subprocess.run(argv, cwd=APP_DIR)
+    if (result.returncode != 0):
+        print("Error: build failed\n")
+        return 1
+    if (find_image(args.arch) is None):
+        print("Error: no image found\n")
+        return 1
+    print(find_image(args.arch))   
+    return 0
 
 
 def cmd_deploy(args):
