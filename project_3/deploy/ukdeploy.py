@@ -109,6 +109,13 @@ def reap_dead(state):
 
     Do not delete from a dict while looping over it: collect the dead names
     first (e.g. in a list), then delete them."""
+    dead_names = []
+    for name, entry in state["instances"].items():
+        if (alive(entry["pid"]) is False):
+            dead_names.append(name)
+
+    for name in dead_names:
+        del state["instances"][name]
     return state
 
 
@@ -124,7 +131,13 @@ def port_free(port):
     If bind() raises OSError, the port is in use: return False. Otherwise
     return True. SO_REUSEADDR makes a port that was just released by a stopped
     instance count as free."""
-    return True
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", port))
+        return True
+    except OSError:
+        return False
 
 
 def pick_port(state):
@@ -135,6 +148,15 @@ def pick_port(state):
       - not the "port" of any entry in state["instances"], and
       - free according to port_free().
     Return None if no port qualifies."""
+    used_ports = []
+
+    for entry in state["instances"].values():
+        used_ports.append(entry["port"])
+
+    for port in range(*PORT_RANGE):
+        if port not in used_ports and port_free(port):
+            return port
+
     return None
 
 
@@ -146,7 +168,14 @@ def ping(port, timeout=2.0):
       3. Read the reply with recv(64). Return True if it contains b"PONG".
 
     If any step raises OSError (refused, timed out, closed), return False."""
-    return False
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=timeout)
+        s.sendall(b"PING\n")
+        data = s.recv(64)
+        s.close()
+        return b"PONG" in data
+    except OSError:
+        return False
 
 
 def wait_ready(port, pid, timeout=READY_TIMEOUT):
@@ -157,6 +186,13 @@ def wait_ready(port, pid, timeout=READY_TIMEOUT):
       - if ping(port) is True, return True;
       - otherwise time.sleep(0.3) and try again.
     Return False if the time runs out."""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if not alive(pid):
+            return False
+        if ping(port):
+            return True
+        time.sleep(0.3)
     return False
 
 
@@ -257,8 +293,114 @@ def cmd_deploy(args):
 
     bench (Part IV) also boots instances, so you may want to put steps 5 to 7
     in a helper function that both can call."""
-    print("TODO: implement deploy")
-    return 1
+    # print("TODO: implement deploy")
+
+    # Step 1: Load state and remove dead instances
+    state = reap_dead(load_state())
+
+    # Step 2: Find the image
+    img = find_image(args.arch)
+    if img is None:
+        print("Image not found. Run ukdeploy.py build first.", file=sys.stderr)
+        return 1
+
+    # Step 3: Choose an instance name
+    if args.name is not None:
+        name = args.name
+    else:
+        i = 1
+        while f"runner{i}" in state["instances"]:
+            i += 1
+        name = f"runner{i}"
+
+    if name in state["instances"]:
+        print(f"Instance '{name}' already exists.", file=sys.stderr)
+        return 1
+
+    # Step 4: Choose a port
+    if args.port is not None:
+        if not port_free(args.port):
+            print(f"Port {args.port} is unavailable.", file=sys.stderr)
+            return 1
+        port = args.port
+    else:
+        port = pick_port(state)
+        if port is None:
+            print("No available ports.", file=sys.stderr)
+            return 1
+
+    # Prevent using a port reserved by another saved instance
+    if any(entry["port"] == port for entry in state["instances"].values()):
+        print(f"Port {port} is already assigned.", file=sys.stderr)
+        return 1
+
+    # Step 5: Build the QEMU command
+    spec = ARCHES[args.arch]
+
+    argv = [
+        spec["qemu"],
+        "-kernel", img,
+        "-nographic",
+        "-no-reboot",
+        "-m", "128M"
+    ]
+
+    if (args.arch == host_arch()
+            and os.access("/dev/kvm", os.R_OK | os.W_OK)):
+        argv.extend(["-enable-kvm", "-cpu", spec["cpu"]])
+    else:
+        argv.extend(["-cpu", spec["fallback_cpu"]])
+
+    argv.extend(spec.get("extra", []))
+
+    argv.extend([
+        "-netdev", f"user,id=n0,hostfwd=tcp::{port}-:{RUNNER_PORT}",
+        "-device", "virtio-net-pci,netdev=n0"
+    ])
+
+    # Step 6: Start QEMU and send output to its log
+    os.makedirs(LOG_DIR, exist_ok=True)
+    log_path = os.path.join(LOG_DIR, f"{name}.log")
+
+    try:
+        with open(log_path, "wb") as log:
+            proc = subprocess.Popen(
+                argv,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True
+            )
+    except OSError as e:
+        print(f"Failed to start QEMU: {e}", file=sys.stderr)
+        return 1
+
+    # Step 7: Wait for the runner to become ready
+    if not wait_ready(port, proc.pid):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+
+        print(f"QEMU failed to become ready. Check {log_path}",
+              file=sys.stderr)
+        return 1
+
+    # Step 8: Save instance information
+    state["instances"][name] = {
+        "pid": proc.pid,
+        "port": port,
+        "image": img,
+        "log": log_path,
+        "arch": args.arch,
+        "started": time.time()
+    }
+
+    save_state(state)
+
+    # Step 9: Print success
+    print(f"deployed {name}  port={port}  pid={proc.pid}")
+    return 0
 
 
 def cmd_bench(args):
@@ -307,8 +449,37 @@ def cmd_list(args):
 
         [{"name": name, **entry} for name, entry in state["instances"].items()]
     """
-    print("TODO: implement list")
-    return 1
+    # print("TODO: implement list")
+    
+    # Step 1: Load state and remove dead instances
+    state = reap_dead(load_state())
+    save_state(state)
+
+    # Part IV: JSON output
+    # if args.json:
+    #     instances = [
+    #         {"name": name, **entry}
+    #         for name, entry in state["instances"].items()
+    #     ]
+    #     print(json.dumps(instances))
+    #     return 0
+
+    # Step 2: Check if any instances exist
+    if not state["instances"]:
+        print("no instances")
+        return 0
+
+    # Step 3: Print instance information
+    for name, entry in state["instances"].items():
+        port = entry["port"]
+        pid = entry["pid"]
+        ready = ping(port)
+        log_path = entry["log"]
+
+        print(f"{name}  port={port}  pid={pid}  "
+              f"ready={ready}  log={log_path}")
+
+    return 0
 
 
 def cmd_stop(args):
@@ -326,8 +497,51 @@ def cmd_stop(args):
          have exited already.
       4. Delete each stopped instance from state["instances"], then
          save_state(state). Return 0."""
-    print("TODO: implement stop")
-    return 1
+    # print("TODO: implement stop")
+    
+    # Step 1: Load state
+    state = load_state()
+
+    # Step 2: Determine which instances to stop
+    if args.all:
+        names = list(state["instances"].keys())
+    elif args.name is not None:
+        if args.name not in state["instances"]:
+            print(f"Instance '{args.name}' not found.", file=sys.stderr)
+            return 1
+        names = [args.name]
+    else:
+        print("Specify an instance name or --all.", file=sys.stderr)
+        return 1
+
+    # Step 3: Stop each instance
+    for name in names:
+        pid = state["instances"][name]["pid"]
+
+        # Attempt graceful termination
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except OSError:
+            pass
+
+        # Wait up to 2 seconds for the process to exit
+        start_time = time.time()
+
+        while alive(pid) and time.time() - start_time < 2:
+            time.sleep(0.1)
+
+        # Force kill if still running
+        if alive(pid):
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except OSError:
+                pass
+
+        # Step 4: Remove instance from state
+        del state["instances"][name]
+
+    save_state(state)
+    return 0
 
 
 # ---- command line (PROVIDED) ---------------------------------------------
