@@ -429,8 +429,79 @@ def cmd_bench(args):
 
     If you put cmd_deploy's steps 5 to 7 in a helper function, call it here
     instead of copying them."""
-    print("TODO: implement bench")
-    return 1
+    # print("TODO: implement bench")
+    img = find_image(args.arch)
+    if img is None:
+        print("Image not found. Run ukdeploy.py build first.", file=sys.stderr)
+        return 1
+
+    times = []
+    for _ in range(args.count):
+        port = pick_port(load_state())
+        if port is None:
+            print("No available ports.", file=sys.stderr)
+            return 1
+        start = time.time()
+        spec = ARCHES[args.arch]
+        argv = [
+            spec["qemu"],
+            "-kernel", img,
+            "-nographic",
+            "-no-reboot",
+            "-m", "128M"
+        ]
+        if (args.arch == host_arch()
+                and os.access("/dev/kvm", os.R_OK | os.W_OK)):
+            argv.extend(["-enable-kvm", "-cpu", spec["cpu"]])
+        else:
+            argv.extend(["-cpu", spec["fallback_cpu"]])
+        argv.extend(spec.get("extra", []))
+        argv.extend([
+            "-netdev", f"user,id=n0,hostfwd=tcp::{port}-:{RUNNER_PORT}",
+            "-device", "virtio-net-pci,netdev=n0"
+        ])
+        try:
+            proc = subprocess.Popen(
+                argv,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True
+            )
+        except OSError as e:
+            print(f"Failed to start QEMU: {e}", file=sys.stderr)
+            return 1
+        if not wait_ready(port, proc.pid):
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except OSError:
+                pass
+            print(f"QEMU failed to become ready on port {port}.",
+                  file=sys.stderr)
+            return 1
+        elapsed = time.time() - start
+        times.append(elapsed)
+
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except OSError:
+            pass
+        proc.wait()
+
+    times.sort()
+    n = len(times)
+    if n % 2 == 1:
+        median = times[n // 2]
+    else:
+        median = (times[n // 2 - 1] + times[n // 2]) / 2
+    max = times[-1]
+    
+    print(f"image      {img}")
+    print(f"image_size {os.path.getsize(img)}")
+    print(f"runs       {args.count}")
+    print(f"ready_p50  {median:.6f}")
+    print(f"ready_max  {max:.6f}")
+    return 0
 
 
 def cmd_list(args):
@@ -456,13 +527,13 @@ def cmd_list(args):
     save_state(state)
 
     # Part IV: JSON output
-    # if args.json:
-    #     instances = [
-    #         {"name": name, **entry}
-    #         for name, entry in state["instances"].items()
-    #     ]
-    #     print(json.dumps(instances))
-    #     return 0
+    if args.json:
+        instances = [
+            {"name": name, **entry}
+            for name, entry in state["instances"].items()
+        ]
+        print(json.dumps(instances))
+        return 0
 
     # Step 2: Check if any instances exist
     if not state["instances"]:
