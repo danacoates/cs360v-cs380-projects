@@ -243,26 +243,24 @@ class Platform:
              self.FAIL_THRESHOLD.
 
         Change b["up"], b["fails"] and b["funcs"] while holding self.lock."""
-        self.lock.acquire()
-        # pass
         try:
             reply = runner_call(b["host"], b["port"], "PING", 1.5)
             if reply == "PONG":
                 reply = runner_call(b["host"], b["port"], "FUNCS", 1.5)
                 if reply.startswith("OK"):
-                    b["funcs"] = set(reply.split()[1:])
-                b["up"] = True
-                b["fails"] = 0
-            else:
-                b["fails"] += 1
-                if b["fails"] >= self.FAIL_THRESHOLD:
-                    b["up"] = False
+                    funcs = set(reply.split()[1:])
+                    with self.lock:
+                        b["funcs"] = funcs
+                        b["up"] = True
+                        b["fails"] = 0
+                    return
         except OSError:
+            pass
+
+        with self.lock:
             b["fails"] += 1
             if b["fails"] >= self.FAIL_THRESHOLD:
                 b["up"] = False
-        finally:
-            self.lock.release()
         
 
     def backends_status(self):
