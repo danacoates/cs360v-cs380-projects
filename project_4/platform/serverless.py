@@ -457,7 +457,23 @@ class Platform:
                  self._last_invocations for the next tick.
 
         Never start or stop processes yourself."""
-        pass
+        self.lock.acquire()
+        shed = self.metrics_data["rejected"] + self.metrics_data["no_backend"]
+        invocations = self.metrics_data["invocations"]
+        any_outstanding = any(b["outstanding"] > 0 for b in self.backends)
+        dynamic_backends = [b for b in self.backends if b["dynamic"]]
+        self.lock.release()
+        
+        if shed > self._last_shed and len(self.backends) < self.max_backends:
+            self._spawn_backend()
+
+        idle = invocations == self._last_invocations and not any_outstanding
+        self._idle_ticks = self._idle_ticks + 1 if idle else 0
+        if self._idle_ticks >= self.SCALE_DOWN_TICKS and len(self.backends) > self.min_backends:
+            self._reap_backend(dynamic_backends[0])
+
+        self._last_shed = shed
+        self._last_invocations = invocations
 
     # ---- invocation: what you implement -------------------------------
 
