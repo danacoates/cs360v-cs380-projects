@@ -189,17 +189,43 @@ class Platform:
             (201, {"name": name, "function": function}).
 
         Hold self.lock while you use self.registry."""
-        return 500, {"error": "deploy not implemented"}
+        self.lock.acquire()
+        if function is None or function == "":
+            function = name
+        if not name:
+            self.lock.release()
+            return 400, {"error": "name is empty"}
+
+        if name in self.registry:
+            self.lock.release()
+            return 409, {"error": "name is already registered"}
+
+        self.registry[name] = {"function": function, "created": time.time()}
+        self._save_registry()
+        self.lock.release()
+        return 201, {"name": name, "function": function}
 
     def list_functions(self):
         """TODO(student) Part I: return a list of the registered functions, each a
         dict with "name", "function" and "created". The registry stores the name
         only as the key, so add "name" to each dict. Hold self.lock."""
-        return []
+        self.lock.acquire()
+        functions = []
+        for name, info in self.registry.items():
+            functions.append({"name": name, "function": info["function"], "created": info["created"]})
+        self.lock.release()
+        return functions
 
     def lookup(self, name):
         """TODO(student) Part I: return the function's dict, including its "name",
         or None if it is not registered. Hold self.lock."""
+        self.lock.acquire()
+        if name in self.registry:
+            function_info = self.registry[name].copy()
+            function_info["name"] = name
+            self.lock.release()
+            return function_info
+        self.lock.release()
         return None
 
     # ---- health checks and backend status: what you implement ---------
