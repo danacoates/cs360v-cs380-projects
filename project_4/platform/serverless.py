@@ -248,11 +248,11 @@ class Platform:
         try:
             reply = runner_call(b["host"], b["port"], "PING", 1.5)
             if reply == "PONG":
-                b["up"] = True
-                b["fails"] = 0
                 reply = runner_call(b["host"], b["port"], "FUNCS", 1.5)
                 if reply.startswith("OK"):
                     b["funcs"] = set(reply.split()[1:])
+                b["up"] = True
+                b["fails"] = 0
             else:
                 b["fails"] += 1
                 if b["fails"] >= self.FAIL_THRESHOLD:
@@ -314,13 +314,46 @@ class Platform:
 
         Do not call lookup() or anything else that takes self.lock in here: you
         already hold it, and taking it a second time hangs forever."""
-        return None
+
+        with self.slot_free:
+            while True:
+                has_function = False   # some backend that is up offers `function`
+                best = None
+
+                for b in self.backends:
+                    if not b["up"] or function not in b["funcs"]:
+                        continue
+                    has_function = True
+
+                    if b["outstanding"] >= self.MAX_OUTSTANDING:
+                        continue  # full, can't use it right now
+
+                    # lowest outstanding wins; ties broken by lowest invocations
+                    if best is None or (b["outstanding"], b["invocations"]) < (
+                        best["outstanding"], best["invocations"]
+                    ):
+                        best = b
+
+                if best is not None:
+                    best["outstanding"] += 1
+                    return best
+
+                if not has_function:
+                    return None  # no live backend has this function at all
+
+                # All matching backends are full: wait for a slot to free up.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return "timeout"
+                self.slot_free.wait(timeout=remaining)
 
     def _release(self, b):
         """TODO(student) Part III: give back the slot _acquire took. Inside
         `with self.slot_free:`, subtract 1 from b["outstanding"] and wake one
         waiting request with self.slot_free.notify()."""
-        pass
+        with self.slot_free:
+            b["outstanding"] -= 1
+            self.slot_free.notify()
 
     # ---- autoscaling --------------------------------------------------
     #
@@ -460,7 +493,72 @@ class Platform:
 
         Catch socket.timeout before OSError: socket.timeout is a kind of
         OSError. Hold self.lock whenever you change a counter."""
-        return 500, {"error": "invoke not implemented"}
+
+        entry = self.lookup(name)          # lookup takes self.lock itself, so call it unlocked
+        if entry is None:
+            return 404, {"error": "not deployed"}
+        function = entry["function"]
+
+        with self.lock:
+            self.metrics_data["invocations"] += 1
+            by_fn = self.metrics_data["by_function"]
+            by_fn[name] = by_fn.get(name, 0) + 1
+
+        deadline = time.monotonic() + self.invoke_timeout
+
+        while time.monotonic() < deadline:
+            b = self._acquire(function, deadline)
+
+            if b is None:
+                with self.lock:
+                    self.metrics_data["no_backend"] += 1
+                return 503, {"error": "no backend"}
+            if b == "timeout":
+                with self.lock:
+                    self.metrics_data["rejected"] += 1
+                return 503, {"error": "rejected"}
+
+            start = time.monotonic()
+            try:
+                reply = runner_call(
+                    b["host"], b["port"],
+                    f"RUN {function} {payload}",
+                    max(0.05, deadline - time.monotonic()),
+                )
+            except socket.timeout:          # must come before OSError
+                with self.lock:
+                    self.metrics_data["timeouts"] += 1
+                    b["errors"] += 1
+                self._note_failure(b)
+                return 504, {"error": "timeout"}
+            except OSError:
+                with self.lock:
+                    b["errors"] += 1
+                self._note_failure(b)
+                continue                    # try another backend
+            finally:
+                self._release(b)            # runs however the call ends
+
+            elapsed = time.monotonic() - start
+
+            if reply.startswith("OK"):
+                with self.lock:
+                    self.metrics_data["successes"] += 1
+                    b["latency_sum"] += elapsed
+                    b["invocations"] += 1
+                return 200, {"result": reply[3:].strip(),
+                            "backend": f"{b['host']}:{b['port']}"}
+
+            if reply.startswith("ERR"):
+                with self.lock:
+                    self.metrics_data["errors"] += 1
+                    b["errors"] += 1
+                return 400, {"error": reply[3:].strip()}
+
+        # deadline passed without a result
+        with self.lock:
+            self.metrics_data["errors"] += 1
+        return 502, {"error": "deadline exceeded"}
 
     # ---- metrics: what you implement ----------------------------------
 
