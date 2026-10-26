@@ -568,7 +568,21 @@ class Platform:
         self.backends_status() (Part II).
         Copy while holding self.lock, but call backends_status() after releasing
         it: it takes the lock itself, and self.lock cannot be taken twice."""
-        return {}
+        self.lock.acquire()
+        metrics_copy = {
+            "invocations": self.metrics_data["invocations"],
+            "successes": self.metrics_data["successes"],
+            "errors": self.metrics_data["errors"],
+            "timeouts": self.metrics_data["timeouts"],
+            "rejected": self.metrics_data["rejected"],
+            "no_backend": self.metrics_data["no_backend"],
+            "scaled_up": self.metrics_data["scaled_up"],
+            "scaled_down": self.metrics_data["scaled_down"],
+            "by_function": dict(self.metrics_data["by_function"]),
+        }
+        self.lock.release()
+        metrics_copy["backends"] = self.backends_status()
+        return metrics_copy
 
 
 # ======================================================================
